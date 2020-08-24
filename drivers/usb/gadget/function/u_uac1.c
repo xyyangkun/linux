@@ -157,6 +157,7 @@ size_t u_audio_playback(struct gaudio *card, void *buf, size_t count)
 	struct gaudio_snd_dev	*snd = &card->playback;
 	struct snd_pcm_substream *substream = snd->substream;
 	struct snd_pcm_runtime *runtime = substream->runtime;
+	mm_segment_t old_fs;
 	ssize_t result;
 	snd_pcm_sframes_t frames;
 
@@ -173,11 +174,15 @@ try_again:
 	}
 
 	frames = bytes_to_frames(runtime, count);
-	result = snd_pcm_kernel_write(snd->substream, buf, frames);
+	old_fs = get_fs();
+	set_fs(KERNEL_DS);
+	result = snd_pcm_lib_write(snd->substream, (void __user *)buf, frames);
 	if (result != frames) {
 		ERROR(card, "Playback error: %d\n", (int)result);
+		set_fs(old_fs);
 		goto try_again;
 	}
+	set_fs(old_fs);
 
 	return 0;
 }

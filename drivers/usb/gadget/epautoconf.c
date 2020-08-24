@@ -20,60 +20,6 @@
 #include <linux/usb/ch9.h>
 #include <linux/usb/gadget.h>
 
-/*
- * if the endpoint match is successful, it was executed.
- */
-struct usb_ep *found_endpoint(
-	struct usb_endpoint_descriptor  *desc,
-	struct usb_ep  *ep,
-	struct usb_gadget  *gadget,
-	struct usb_ss_ep_comp_descriptor *ep_comp
-)
-{
-	u8		type;
-
-	type = desc->bmAttributes & USB_ENDPOINT_XFERTYPE_MASK;
-
-	/*
-	 * If the protocol driver hasn't yet decided on wMaxPacketSize
-	 * and wants to know the maximum possible, provide the info.
-	 */
-	if (desc->wMaxPacketSize == 0)
-		desc->wMaxPacketSize = cpu_to_le16(ep->maxpacket_limit);
-
-	/* report address */
-	desc->bEndpointAddress &= USB_DIR_IN;
-	if (isdigit(ep->name[2])) {
-		u8 num = simple_strtoul(&ep->name[2], NULL, 10);
-
-		desc->bEndpointAddress |= num;
-	} else if (desc->bEndpointAddress & USB_DIR_IN) {
-		if (++gadget->in_epnum > 15)
-			return NULL;
-		desc->bEndpointAddress = USB_DIR_IN | gadget->in_epnum;
-	} else {
-		if (++gadget->out_epnum > 15)
-			return NULL;
-		desc->bEndpointAddress |= gadget->out_epnum;
-	}
-
-	/* report (variable) full speed bulk maxpacket */
-	if ((type == USB_ENDPOINT_XFER_BULK) && !ep_comp) {
-		int size = ep->maxpacket_limit;
-
-		/* min() doesn't work on bitfields with gcc-3.5 */
-		if (size > 64)
-			size = 64;
-		desc->wMaxPacketSize = cpu_to_le16(size);
-	}
-
-	ep->address = desc->bEndpointAddress;
-	ep->desc = NULL;
-	ep->comp_desc = NULL;
-	ep->claimed = true;
-	return ep;
-}
-
 /**
  * usb_ep_autoconfig_ss() - choose an endpoint matching the ep
  * descriptor and ep companion descriptor
@@ -125,55 +71,65 @@ struct usb_ep *usb_ep_autoconfig_ss(
 )
 {
 	struct usb_ep	*ep;
+	u8		type;
+
+	type = desc->bmAttributes & USB_ENDPOINT_XFERTYPE_MASK;
 
 	if (gadget->ops->match_ep) {
 		ep = gadget->ops->match_ep(gadget, desc, ep_comp);
 		if (ep)
-			return found_endpoint(desc, ep, gadget, ep_comp);
+			goto found_ep;
 	}
 
 	/* Second, look at endpoints until an unclaimed one looks usable */
 	list_for_each_entry (ep, &gadget->ep_list, ep_list) {
 		if (usb_gadget_ep_match_desc(gadget, ep, desc, ep_comp))
-			return found_endpoint(desc, ep, gadget, ep_comp);
+			goto found_ep;
 	}
 
 	/* Fail */
 	return NULL;
+found_ep:
+
+	/*
+	 * If the protocol driver hasn't yet decided on wMaxPacketSize
+	 * and wants to know the maximum possible, provide the info.
+	 */
+	if (desc->wMaxPacketSize == 0)
+		desc->wMaxPacketSize = cpu_to_le16(ep->maxpacket_limit);
+
+	/* report address */
+	desc->bEndpointAddress &= USB_DIR_IN;
+	if (isdigit(ep->name[2])) {
+		u8 num = simple_strtoul(&ep->name[2], NULL, 10);
+		desc->bEndpointAddress |= num;
+	} else if (desc->bEndpointAddress & USB_DIR_IN) {
+		if (++gadget->in_epnum > 15)
+			return NULL;
+		desc->bEndpointAddress = USB_DIR_IN | gadget->in_epnum;
+	} else {
+		if (++gadget->out_epnum > 15)
+			return NULL;
+		desc->bEndpointAddress |= gadget->out_epnum;
+	}
+
+	/* report (variable) full speed bulk maxpacket */
+	if ((type == USB_ENDPOINT_XFER_BULK) && !ep_comp) {
+		int size = ep->maxpacket_limit;
+
+		/* min() doesn't work on bitfields with gcc-3.5 */
+		if (size > 64)
+			size = 64;
+		desc->wMaxPacketSize = cpu_to_le16(size);
+	}
+
+	ep->address = desc->bEndpointAddress;
+	ep->desc = NULL;
+	ep->comp_desc = NULL;
+	ep->claimed = true;
+	return ep;
 }
 EXPORT_SYMBOL_GPL(usb_ep_autoconfig_ss);
-
-/**
- * usb_ep_autoconfig_ss_backwards() - choose an endpoint matching the ep
- * descriptor and ep companion descriptor.
- *
- * unlike the usb_ep_autoconfig_ss(), this interface is auto configured
- * in reverse.
- */
-struct usb_ep *usb_ep_autoconfig_ss_backwards(
-	struct usb_gadget		*gadget,
-	struct usb_endpoint_descriptor	*desc,
-	struct usb_ss_ep_comp_descriptor *ep_comp
-)
-{
-	struct usb_ep	*ep;
-
-	if (gadget->ops->match_ep) {
-		ep = gadget->ops->match_ep(gadget, desc, ep_comp);
-		if (ep)
-			return found_endpoint(desc, ep, gadget, ep_comp);
-	}
-
-	/* Second, look at endpoints until an unclaimed one looks usable */
-	list_for_each_entry_reverse(ep, &gadget->ep_list, ep_list) {
-		if (usb_gadget_ep_match_desc(gadget, ep, desc, ep_comp))
-			return found_endpoint(desc, ep, gadget, ep_comp);
-	}
-
-	/* Fail */
-	return NULL;
-}
-EXPORT_SYMBOL_GPL(usb_ep_autoconfig_ss_backwards);
 
 /**
  * usb_ep_autoconfig() - choose an endpoint matching the

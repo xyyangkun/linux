@@ -133,18 +133,13 @@ static int uvcg_video_ep_queue(struct uvc_video *video, struct usb_request *req)
 {
 	int ret;
 
-	/*
-	 * Fixme, this is just to workaround the warning by udc core when the ep
-	 * is disabled, this may happens when the uvc application is still
-	 * streaming new data while the uvc gadget driver has already recieved
-	 * the streamoff but the streamoff event is not yet received by the app
-	 */
-	if (!video->ep->enabled)
-		return -EINVAL;
-
 	ret = usb_ep_queue(video->ep, req, GFP_ATOMIC);
-	if (ret < 0)
+	if (ret < 0) {
 		printk(KERN_INFO "Failed to queue request (%d).\n", ret);
+		/* Isochronous endpoints can't be halted. */
+		if (usb_endpoint_xfer_bulk(video->ep->desc))
+			usb_ep_set_halt(video->ep);
+	}
 
 	return ret;
 }
@@ -396,7 +391,7 @@ int uvcg_video_enable(struct uvc_video *video, int enable)
 /*
  * Initialize the UVC video stream.
  */
-int uvcg_video_init(struct uvc_video *video, struct uvc_device *uvc)
+int uvcg_video_init(struct uvc_video *video)
 {
 	INIT_LIST_HEAD(&video->req_free);
 	spin_lock_init(&video->req_lock);
@@ -406,7 +401,6 @@ int uvcg_video_init(struct uvc_video *video, struct uvc_device *uvc)
 	video->width = 320;
 	video->height = 240;
 	video->imagesize = 320 * 240 * 2;
-	video->uvc = uvc;
 
 	/* Initialize the video buffers queue. */
 	uvcg_queue_init(&video->queue, V4L2_BUF_TYPE_VIDEO_OUTPUT,

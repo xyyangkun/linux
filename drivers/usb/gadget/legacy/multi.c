@@ -162,8 +162,21 @@ static int rndis_do_config(struct usb_configuration *c)
 	if (ret)
 		goto err_conf;
 
-	return 0;
+	f_msg_rndis = usb_get_function(fi_msg);
+	if (IS_ERR(f_msg_rndis)) {
+		ret = PTR_ERR(f_msg_rndis);
+		goto err_fsg;
+	}
 
+	ret = usb_add_function(c, f_msg_rndis);
+	if (ret)
+		goto err_run;
+
+	return 0;
+err_run:
+	usb_put_function(f_msg_rndis);
+err_fsg:
+	usb_remove_function(c, f_acm_rndis);
 err_conf:
 	usb_put_function(f_acm_rndis);
 err_func_acm:
@@ -232,6 +245,16 @@ static int cdc_do_config(struct usb_configuration *c)
 	if (ret)
 		goto err_conf;
 
+	f_msg_multi = usb_get_function(fi_msg);
+	if (IS_ERR(f_msg_multi)) {
+		ret = PTR_ERR(f_msg_multi);
+		goto err_fsg;
+	}
+
+	ret = usb_add_function(c, f_msg_multi);
+	if (ret)
+		goto err_run;
+
 	return 0;
 err_run:
 	usb_put_function(f_msg_multi);
@@ -281,7 +304,8 @@ static int __ref multi_bind(struct usb_composite_dev *cdev)
 #ifdef USB_ETH_RNDIS
 	struct f_rndis_opts *rndis_opts;
 #endif
-
+	struct fsg_opts *fsg_opts;
+	struct fsg_config config;
 	int status;
 
 	if (!can_support_ecm(cdev->gadget)) {
@@ -343,6 +367,32 @@ static int __ref multi_bind(struct usb_composite_dev *cdev)
 		goto fail0;
 	}
 
+	/* set up mass storage function */
+	fi_msg = usb_get_function_instance("mass_storage");
+	if (IS_ERR(fi_msg)) {
+		status = PTR_ERR(fi_msg);
+		goto fail1;
+	}
+	fsg_config_from_params(&config, &fsg_mod_data, fsg_num_buffers);
+	fsg_opts = fsg_opts_from_func_inst(fi_msg);
+
+	fsg_opts->no_configfs = true;
+	status = fsg_common_set_num_buffers(fsg_opts->common, fsg_num_buffers);
+	if (status)
+		goto fail2;
+
+	status = fsg_common_set_cdev(fsg_opts->common, cdev, config.can_stall);
+	if (status)
+		goto fail_set_cdev;
+
+	fsg_common_set_sysfs(fsg_opts->common, true);
+	status = fsg_common_create_luns(fsg_opts->common, &config);
+	if (status)
+		goto fail_set_cdev;
+
+	fsg_common_set_inquiry_string(fsg_opts->common, config.vendor_name,
+				      config.product_name);
+
 	/* allocate string IDs */
 	status = usb_string_ids_tab(cdev, strings_dev);
 	if (unlikely(status < 0))
@@ -380,6 +430,13 @@ fail_otg_desc:
 	kfree(otg_desc[0]);
 	otg_desc[0] = NULL;
 fail_string_ids:
+	fsg_common_remove_luns(fsg_opts->common);
+fail_set_cdev:
+	fsg_common_free_buffers(fsg_opts->common);
+fail2:
+	usb_put_function_instance(fi_msg);
+fail1:
+	usb_put_function_instance(fi_acm);
 fail0:
 #ifdef USB_ETH_RNDIS
 	usb_put_function_instance(fi_rndis);
@@ -429,7 +486,7 @@ static struct usb_composite_driver multi_driver = {
 	.name		= "g_multi",
 	.dev		= &device_desc,
 	.strings	= dev_strings,
-	.max_speed	= USB_SPEED_HIGH,
+	.max_speed	= USB_SPEED_SUPER,
 	.bind		= multi_bind,
 	.unbind		= multi_unbind,
 	.needs_serial	= 1,

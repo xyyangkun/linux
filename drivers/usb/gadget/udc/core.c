@@ -106,6 +106,17 @@ int usb_ep_enable(struct usb_ep *ep)
 	if (ep->enabled)
 		goto out;
 
+	/* UDC drivers can't handle endpoints with maxpacket size 0 */
+	if (usb_endpoint_maxp(ep->desc) == 0) {
+		/*
+		 * We should log an error message here, but we can't call
+		 * dev_err() because there's no way to find the gadget
+		 * given only ep.
+		 */
+		ret = -EINVAL;
+		goto out;
+	}
+
 	ret = ep->ops->enable(ep, ep->desc);
 	if (ret)
 		goto out;
@@ -139,10 +150,8 @@ int usb_ep_disable(struct usb_ep *ep)
 		goto out;
 
 	ret = ep->ops->disable(ep);
-	if (ret) {
-		ret = ret;
+	if (ret)
 		goto out;
-	}
 
 	ep->enabled = false;
 
@@ -192,8 +201,8 @@ EXPORT_SYMBOL_GPL(usb_ep_alloc_request);
 void usb_ep_free_request(struct usb_ep *ep,
 				       struct usb_request *req)
 {
-	ep->ops->free_request(ep, req);
 	trace_usb_ep_free_request(ep, req, 0);
+	ep->ops->free_request(ep, req);
 }
 EXPORT_SYMBOL_GPL(usb_ep_free_request);
 
@@ -249,6 +258,9 @@ EXPORT_SYMBOL_GPL(usb_ep_free_request);
  * For periodic endpoints, like interrupt or isochronous ones, the usb host
  * arranges to poll once per interval, and the gadget driver usually will
  * have queued some data to transfer at that time.
+ *
+ * Note that @req's ->complete() callback must never be called from
+ * within usb_ep_queue() as that can create deadlock situations.
  *
  * Returns zero, or a negative error code.  Endpoints that are not enabled
  * report errors; errors will also be
@@ -805,6 +817,8 @@ int usb_gadget_map_request_by_dev(struct device *dev,
 			dev_err(dev, "failed to map buffer\n");
 			return -EFAULT;
 		}
+
+		req->dma_mapped = 1;
 	}
 
 	return 0;
@@ -829,9 +843,10 @@ void usb_gadget_unmap_request_by_dev(struct device *dev,
 				is_in ? DMA_TO_DEVICE : DMA_FROM_DEVICE);
 
 		req->num_mapped_sgs = 0;
-	} else {
+	} else if (req->dma_mapped) {
 		dma_unmap_single(dev, req->dma, req->length,
 				is_in ? DMA_TO_DEVICE : DMA_FROM_DEVICE);
+		req->dma_mapped = 0;
 	}
 }
 EXPORT_SYMBOL_GPL(usb_gadget_unmap_request_by_dev);
@@ -913,7 +928,7 @@ int usb_gadget_ep_match_desc(struct usb_gadget *gadget,
 		return 0;
 
 	/* "high bandwidth" works only at high speed */
-	if (!gadget_is_dualspeed(gadget) && usb_endpoint_maxp(desc) & (3<<11))
+	if (!gadget_is_dualspeed(gadget) && usb_endpoint_maxp_mult(desc) > 1)
 		return 0;
 
 	switch (type) {
@@ -966,6 +981,15 @@ static void usb_gadget_state_work(struct work_struct *work)
 	if (udc)
 		sysfs_notify(&udc->dev.kobj, NULL, "state");
 }
+
+void usb_gadget_set_state(struct usb_gadget *gadget,
+		enum usb_device_state state)
+{
+	gadget->state = state;
+	schedule_work(&gadget->work);
+}
+EXPORT_SYMBOL_GPL(usb_gadget_set_state);
+
 /* ------------------------------------------------------------------------- */
 
 static void usb_udc_connect_control(struct usb_udc *udc)
@@ -974,24 +998,6 @@ static void usb_udc_connect_control(struct usb_udc *udc)
 		usb_gadget_connect(udc->gadget);
 	else
 		usb_gadget_disconnect(udc->gadget);
-}
-
-/* should be called with udc_lock held */
-static int check_pending_gadget_drivers(struct usb_udc *udc)
-{
-       struct usb_gadget_driver *driver;
-       int ret = 0;
-
-       list_for_each_entry(driver, &gadget_driver_pending_list, pending)
-               if (!driver->udc_name || strcmp(driver->udc_name,
-                                               dev_name(&udc->dev)) == 0) {
-                       ret = udc_bind_to_driver(udc, driver);
-                       if (ret != -EPROBE_DEFER)
-                               list_del(&driver->pending);
-                       break;
-               }
-
-       return ret;
 }
 
 /**
@@ -1013,15 +1019,6 @@ void usb_udc_vbus_handler(struct usb_gadget *gadget, bool status)
 	}
 }
 EXPORT_SYMBOL_GPL(usb_udc_vbus_handler);
-
-/* ------------------------------------------------------------------------- */
-void usb_gadget_set_state(struct usb_gadget *gadget,
-                enum usb_device_state state)
-{
-        gadget->state = state;
-}
-EXPORT_SYMBOL_GPL(usb_gadget_set_state);
-/* ------------------------------------------------------------------------- */
 
 /**
  * usb_gadget_udc_reset - notifies the udc core that bus reset occurs
@@ -1096,6 +1093,24 @@ static const struct attribute_group *usb_udc_attr_groups[];
 static void usb_udc_nop_release(struct device *dev)
 {
 	dev_vdbg(dev, "%s\n", __func__);
+}
+
+/* should be called with udc_lock held */
+static int check_pending_gadget_drivers(struct usb_udc *udc)
+{
+	struct usb_gadget_driver *driver;
+	int ret = 0;
+
+	list_for_each_entry(driver, &gadget_driver_pending_list, pending)
+		if (!driver->udc_name || strcmp(driver->udc_name,
+						dev_name(&udc->dev)) == 0) {
+			ret = udc_bind_to_driver(udc, driver);
+			if (ret != -EPROBE_DEFER)
+				list_del(&driver->pending);
+			break;
+		}
+
+	return ret;
 }
 
 /**
